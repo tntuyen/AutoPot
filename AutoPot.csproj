@@ -1,4 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
+
   <PropertyGroup>
     <OutputType>Library</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
@@ -12,16 +13,14 @@
     <PackageReference Include="OriathHub.Sdk" Version="0.13.0" />
   </ItemGroup>
 
-  <!--
-    OriathHubDir is optional and only used for the local convenience copy below.
-    Set it as an environment variable or pass -p:OriathHubDir=... on the command
-    line; do NOT hardcode a personal path here (breaks builds on other machines
-    / the plugin marketplace's build pipeline).
-  -->
-  <Target Name="CopyToPlugins" AfterTargets="Build"
-          Condition="'$(OriathHubDir)' != '' and Exists('$(OriathHubDir)')">
+  <PropertyGroup>
+
+  </PropertyGroup>
+
+  <Target Name="CopyToHostPluginsDir" AfterTargets="Build" Condition="Exists('$(OriathHubDir)')">
     <Copy SourceFiles="$(OutDir)$(TargetName)$(TargetExt)"
           DestinationFolder="$(OriathHubDir)\Plugins\$(AssemblyName)"
           SkipUnchangedFiles="true" />
   </Target>
+
 </Project>
