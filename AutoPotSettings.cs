@@ -1,4 +1,6 @@
+using System.Collections.Generic;
 using ClickableTransparentOverlay.Win32;
+using OriathHub.RemoteEnums;
 
 namespace AutoPot
 {
@@ -36,6 +38,31 @@ namespace AutoPot
         public int AutoDisconnectPercent = 10;
     }
 
+    /// <summary>
+    ///     "Surrounded" condition: press a flask when at least <see cref="MinCount"/> monsters of
+    ///     rarity &gt;= <see cref="MinRarity"/> are within range of the player (range is a single
+    ///     global setting shared by all conditions — see <see cref="AutoPotSettings.MonsterTriggerRange"/>).
+    ///     Idea from Murdoc (Discord): "If [number] monster's [Normal/Magic/Rare/Unique]+ rarity in
+    ///     [number] range".
+    /// </summary>
+    public sealed class MonsterTriggerRule
+    {
+        /// <summary>User-editable label shown in place of "Enabled" so multiple conditions are easy to tell apart.</summary>
+        public string Name = "Condition";
+
+        /// <summary>Whether this condition is monitored.</summary>
+        public bool Enabled = false;
+
+        /// <summary>Minimum monster rarity to count (monster.Rarity &gt;= this).</summary>
+        public Rarity MinRarity = Rarity.Rare;
+
+        /// <summary>How many qualifying monsters must be in range to trigger.</summary>
+        public int MinCount = 3;
+
+        /// <summary>Which flask slot to press (0 = None, 1 = Flask 1, 2 = Flask 2).</summary>
+        public int FlaskSlot = 0;
+    }
+
     /// <summary>Persisted AutoPot settings.</summary>
     public sealed class AutoPotSettings
     {
@@ -51,9 +78,17 @@ namespace AutoPot
         /// <summary>Key bound to flask slot 2. Unset = disabled.</summary>
         public VK Flask2Key = VK.KEY_2;
 
+        /// <summary>Range in grid units (same unit as Entity.DistanceFrom), shared by every Monster proximity condition.</summary>
+        public int MonsterTriggerRange = 40;
+
+        /// <summary>Draw a circle around the player at MonsterTriggerRange, to visually test the setting.</summary>
+        public bool ShowMonsterRangeCircle = false;
+
         public VitalRule Life         { get; set; } = new() { FlaskSlot = 1, TriggerPercent = 76 };
         public VitalRule Mana         { get; set; } = new() { FlaskSlot = 2, TriggerPercent = 50 };
         public VitalRule EnergyShield { get; set; } = new() { TriggerPercent = 50 };
         public VitalRule Ward         { get; set; } = new() { TriggerPercent = 50 };
+
+        public List<MonsterTriggerRule> MonsterTriggers { get; set; } = new();
     }
 }

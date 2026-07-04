@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Numerics;
 using ClickableTransparentOverlay.Win32;
+using GameOffsets.Natives;
 using ImGuiNET;
 using OriathHub;
 using OriathHub.RemoteEnums;
@@ -35,6 +36,9 @@ namespace AutoPot
         // Cached flask state (refreshed each frame).
         private bool[]? _flaskActive;
         private Inventory? _flaskInventory;
+
+        // Which monster-trigger rules currently have their name in "edit" mode (UI-only, not persisted).
+        private readonly HashSet<MonsterTriggerRule> _renamingMonsterRule = new();
 
         private FileInfo SettingsFile => new(Path.Combine(DllDirectory, "config", "settings.json"));
 
@@ -86,6 +90,10 @@ namespace AutoPot
                 DrawOverlay(life);
             }
 
+            // Range-test circles — visual only, so these show even without strict game
+            // foreground (lets you tweak Range while looking at the settings panel).
+            DrawMonsterRangeCircles(player);
+
             // Flask pressing requires the GAME itself to be foreground (keys are sent to game).
             if (!Core.Process.Foreground) return;
             if (Core.States.InGameStateObject!.GameUi.IsAnyLargePanelOpen) return;
@@ -108,6 +116,11 @@ namespace AutoPot
             ProcessVital(VitalKind.Mana,         _s.Mana,         life.Mana);
             ProcessVital(VitalKind.EnergyShield, _s.EnergyShield, life.EnergyShield);
             ProcessVital(VitalKind.Ward,         _s.Ward,         life.Ward);
+
+            foreach (var rule in _s.MonsterTriggers)
+            {
+                ProcessMonsterTrigger(rule, area, player);
+            }
         }
 
         private static void DrawOverlay(Life life)
@@ -135,6 +148,49 @@ namespace AutoPot
             ImGui.PushStyleColor(ImGuiCol.PlotHistogram, color);
             ImGui.ProgressBar(pct / 100f, new Vector2(140, 14), $"{tag} {pct:0}%");
             ImGui.PopStyleColor();
+        }
+
+        // ── Range-test circle (visual aid for Monster proximity's Range field) ──
+
+        // Approximate grid-unit -> world-unit scale, borrowed from the ExplosiveRange plugin
+        // (back-derived there, not independently re-verified here — good enough for a visual
+        // test aid, not used for any actual trigger math).
+        private const float GridToWorldScale = 10.83f;
+
+        private void DrawMonsterRangeCircles(Entity player)
+        {
+            if (!_s.ShowMonsterRangeCircle) return;
+            if (!player.TryGetComponent<Render>(out var render) || render == null) return;
+
+            var world = Core.States.InGameStateObject?.CurrentWorldInstance;
+            if (world == null) return;
+
+            var win = Core.Process.WindowArea;
+            float worldRadius = _s.MonsterTriggerRange * GridToWorldScale;
+            DrawWorldCircle(world, render.WorldPosition, render.TerrainHeight, worldRadius,
+                0xFF00FFFF, 3f, win.Width, win.Height);
+        }
+
+        private static void DrawWorldCircle(WorldData world, StdTuple3D<float> center, float terrainZ,
+            float radius, uint color, float thickness, float winW, float winH)
+        {
+            const int N = 40;
+            Span<Vector2> pts = stackalloc Vector2[N];
+            for (int i = 0; i < N; i++)
+            {
+                float a = i * 2f * MathF.PI / N;
+                pts[i] = world.WorldToScreen(new StdTuple3D<float>
+                {
+                    X = center.X + MathF.Cos(a) * radius,
+                    Y = center.Y + MathF.Sin(a) * radius,
+                    Z = terrainZ
+                });
+            }
+
+            var dl = ImGui.GetBackgroundDrawList();
+            for (int i = 0; i < N; i++)
+                if (pts[i].X > -500 && pts[i].X < winW + 500)
+                    dl.AddLine(pts[i], pts[(i + 1) % N], color, thickness);
         }
 
         private void ProcessVital(VitalKind kind, VitalRule rule, VitalInfo vital)
@@ -203,6 +259,61 @@ namespace AutoPot
             }
         }
 
+        // ── "Surrounded" monster-proximity trigger (Murdoc's idea) ──────
+
+        private void ProcessMonsterTrigger(MonsterTriggerRule rule, AreaInstance area, Entity player)
+        {
+            if (!rule.Enabled) return;
+
+            int slot = rule.FlaskSlot;
+            if (slot != 1 && slot != 2) return; // 0 = None
+
+            VK key = slot == 1 ? _s.Flask1Key : _s.Flask2Key;
+            if (IsKeyUnset(key)) return;
+
+            int count = 0;
+            foreach (var e in area.GetAwakeEntitiesSnapshot())
+            {
+                if (e == null || !e.IsValid) continue;
+                if (e.EntityType != OriathHub.RemoteEnums.Entity.EntityTypes.Monster) continue;
+                if (!e.TryGetComponent<Life>(out var mLife) || mLife == null || !mLife.IsAlive) continue;
+
+                // Some frameworks only attach ObjectMagicProperties to Magic+ monsters (plain
+                // Normal ones may not carry it at all). Missing component -> treat as Normal
+                // rather than skipping the monster, so "Normal+" (i.e. count everything) works.
+                Rarity monsterRarity = Rarity.Normal;
+                if (e.TryGetComponent<ObjectMagicProperties>(out var omp) && omp != null)
+                {
+                    monsterRarity = omp.Rarity;
+                }
+
+                if (monsterRarity < rule.MinRarity) continue;
+                if (player.DistanceFrom(e) > _s.MonsterTriggerRange) continue;
+
+                count++;
+                if (count >= rule.MinCount) break; // no need to keep scanning
+            }
+
+            if (count < rule.MinCount) return;
+
+            // No cooldown timer — the only guard against spamming the key is the
+            // flask's own "effect already active" / "no charges" state below.
+            if (_flaskActive != null && slot - 1 < _flaskActive.Length && _flaskActive[slot - 1]) return;
+
+            if (_flaskInventory != null)
+            {
+                var flaskItem = _flaskInventory[0, slot - 1];
+                if (flaskItem != null && flaskItem.Address != IntPtr.Zero &&
+                    flaskItem.TryGetComponent<Charges>(out var charges) && charges != null &&
+                    charges.Current < charges.PerUseCharge)
+                {
+                    return; // not enough charges
+                }
+            }
+
+            MiscHelper.KeyUp(key);
+        }
+
         // ── Settings UI ────────────────────────────────────────────────
 
         public override void DrawSettings()
@@ -269,7 +380,160 @@ namespace AutoPot
             changed |= DrawVitalSection("Shield", VitalKind.EnergyShield,_s.EnergyShield,  lifeComp?.EnergyShield, new Vector4(0.30f, 0.85f, 0.85f, 1f));
             changed |= DrawVitalSection("Ward",   VitalKind.Ward,        _s.Ward,         lifeComp?.Ward,         new Vector4(0.70f, 0.70f, 0.70f, 1f));
 
+            ImGui.Spacing();
+            ImGui.Separator();
+            ImGui.Spacing();
+
+            changed |= DrawMonsterTriggerListSection();
+
             if (changed) SaveSettings();
+        }
+
+        // ── "Surrounded" monster-proximity section (supports multiple rules) ───
+
+        private bool DrawMonsterTriggerListSection()
+        {
+            bool changed = false;
+
+            ImGui.Text("Monster proximity");
+            ImGui.TextDisabled("Press a flask when N+ monsters of a rarity are within range.");
+            ImGui.Spacing();
+
+            // Range applies to every condition below — set it once here.
+            ImGui.Text("Range active");
+            ImGui.SameLine(130);
+            ImGui.SetNextItemWidth(240);
+            if (ImGui.SliderInt("##globalRange", ref _s.MonsterTriggerRange, 1, 150, "%d")) changed = true;
+            if (_s.MonsterTriggerRange < 1) _s.MonsterTriggerRange = 1;
+
+            changed |= ImGui.Checkbox("Show range circle (test)", ref _s.ShowMonsterRangeCircle);
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Draws a circle around your character at this Range so you can see it in-game.\n" +
+                                  "Visual only — doesn't affect the actual trigger.");
+
+            ImGui.Spacing();
+            ImGui.Separator();
+            ImGui.Spacing();
+
+            MonsterTriggerRule? toRemove = null;
+
+            for (var i = 0; i < _s.MonsterTriggers.Count; i++)
+            {
+                ImGui.PushID(i);
+                changed |= DrawMonsterTriggerSection(_s.MonsterTriggers[i], out bool remove);
+                if (remove) toRemove = _s.MonsterTriggers[i];
+                ImGui.PopID();
+            }
+
+            if (toRemove != null)
+            {
+                _s.MonsterTriggers.Remove(toRemove);
+                _renamingMonsterRule.Remove(toRemove);
+                changed = true;
+            }
+
+            if (ImGui.Button("+ Add condition"))
+            {
+                _s.MonsterTriggers.Add(new MonsterTriggerRule());
+                changed = true;
+            }
+
+            return changed;
+        }
+
+        private bool DrawMonsterTriggerSection(MonsterTriggerRule rule, out bool remove)
+        {
+            bool changed = false;
+            remove = false;
+
+            changed |= ImGui.Checkbox("##monEn", ref rule.Enabled);
+            ImGui.SameLine();
+
+            bool renaming = _renamingMonsterRule.Contains(rule);
+            if (renaming)
+            {
+                ImGui.SetNextItemWidth(160);
+                if (string.IsNullOrEmpty(rule.Name)) rule.Name = "Condition";
+                if (ImGui.InputText("##monName", ref rule.Name, 40,
+                        ImGuiInputTextFlags.EnterReturnsTrue | ImGuiInputTextFlags.AutoSelectAll))
+                {
+                    _renamingMonsterRule.Remove(rule);
+                    changed = true;
+                }
+
+                ImGui.SameLine();
+                if (ImGui.SmallButton("Done"))
+                {
+                    _renamingMonsterRule.Remove(rule);
+                }
+            }
+            else
+            {
+                ImGui.Text(string.IsNullOrEmpty(rule.Name) ? "Condition" : rule.Name);
+                ImGui.SameLine();
+                if (ImGui.SmallButton("Rename"))
+                {
+                    _renamingMonsterRule.Add(rule);
+                }
+            }
+
+            ImGui.SameLine();
+            if (ImGui.SmallButton("Remove"))
+            {
+                remove = true;
+            }
+
+            if (!rule.Enabled)
+            {
+                ImGui.Spacing();
+                ImGui.Separator();
+                ImGui.Spacing();
+                return changed;
+            }
+
+            ImGui.Indent(28);
+
+            ImGui.Text("Active");
+            ImGui.SameLine();
+
+            ImGui.SetNextItemWidth(110);
+            string[] flaskOptions = { "None", "Flask 1", "Flask 2" };
+            int flaskIdx = rule.FlaskSlot;
+            if (ImGui.Combo("##monFlask", ref flaskIdx, flaskOptions, flaskOptions.Length))
+            {
+                rule.FlaskSlot = flaskIdx;
+                changed = true;
+            }
+
+            ImGui.SameLine();
+            ImGui.Text("when");
+            ImGui.SameLine();
+
+            ImGui.SetNextItemWidth(50);
+            if (ImGui.InputInt("##count", ref rule.MinCount, 0, 0)) changed = true;
+            if (rule.MinCount < 1) rule.MinCount = 1;
+
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(120);
+            string[] rarityOptions = { "Magic", "Rare", "Unique" }; // Normal isn't meaningful here — always excluded
+            int rarityIdx = (int)rule.MinRarity - 1; // enum: Normal=0,Magic=1,Rare=2,Unique=3 -> shift by 1
+            if (rarityIdx < 0) rarityIdx = 0; // guard old saved configs that had Normal selected
+            if (ImGui.Combo("##rarity", ref rarityIdx, rarityOptions, rarityOptions.Length))
+            {
+                rule.MinRarity = (Rarity)(rarityIdx + 1);
+                changed = true;
+            }
+
+            ImGui.SameLine();
+            ImGui.Text("+ monster's in range");
+
+            ImGui.Unindent(28);
+
+            ImGui.Spacing();
+            ImGui.Separator();
+            ImGui.Spacing();
+
+            return changed;
         }
 
         // ── Progress bar ───────────────────────────────────────────────
