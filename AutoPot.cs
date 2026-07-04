@@ -45,7 +45,7 @@ namespace AutoPot
         public override string Name        => "AutoPot";
         public override string Author      => "kanguru86";
         public override string Description => "Automatically uses flasks when life / ES / mana / ward drops below a threshold.";
-        public override string Version     => "1.0.0";
+        public override string Version     => "1.1.0";
 
         // ── Lifecycle ──────────────────────────────────────────────────
 
